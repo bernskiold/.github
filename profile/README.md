@@ -1,3 +1,5 @@
+![Bernskiold Media](https://raw.githubusercontent.com/bernskioldmedia/.github/main/docs/images/readme-logo.jpg)
+
 ## About Bernskiold Media
 
 [Bernskiold Media](https://bernskioldmedia.com) is a digital studio that creates ambitious websites, web and business applications that lets your business grow and makes your users happy.
