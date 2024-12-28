@@ -1,4 +1,4 @@
-![Bernskiold Media](https://raw.githubusercontent.com/bernskioldmedia/.github/main/docs/images/readme-logo.jpg)
+![Bernskiold Media](https://raw.githubusercontent.com/bernskioldmedia/.github/main/docs/images/readme-logo-2025.png)
 
 ## About Bernskiold Media
 
