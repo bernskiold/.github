@@ -1,0 +1,317 @@
+# Reusable test workflow for Bernskiold WordPress plugins.
+#
+# Runs the PHP integration suite against a real WordPress (WP test library via
+# the plugin's bin/install-wp-tests.sh + a MySQL service) across a PHP x WP
+# matrix, plus optional PHP/JS lint, committed-build check, Jest unit and wp-env/Playwright e2e jobs.
+#
+# Plugin requirements:
+#   - bin/install-wp-tests.sh [wp-version] [db-name] [db-user] [db-pass] [db-host]
+#     that prints KEY=value lines to export (e.g. WP_PHPUNIT__DIR).
+#   - `composer test` runs PHPUnit.
+#   - `npm run build` (when `build` is true and a package.json exists).
+#   - `npm run test:unit` (js-unit), `npm run env:start` + `npm run test:e2e` (e2e),
+#     `composer lint` (php-lint), `npm run lint:js` / `lint:css` (js-lint).
+# All of these run inside `working-directory` (default: repo root), so a
+# plugin nested in a site repo can be tested too.
+#
+# See README.md in bernskiold/.github for a caller example.
+name: WordPress Plugin Tests
+
+on:
+    workflow_call:
+        inputs:
+            php-versions:
+                description: JSON array of PHP versions for the PHPUnit matrix.
+                type: string
+                default: '["8.2","8.3","8.4","8.5"]'
+            wp-versions:
+                description: JSON array of WordPress versions ("latest" allowed) for the PHPUnit matrix.
+                type: string
+                default: '["7.0","latest"]'
+            php-extensions:
+                description: PHP extensions for the PHPUnit job (shivammathur/setup-php `extensions` syntax, e.g. 'mysqli, imagick').
+                type: string
+                default: 'mysqli'
+            node-version:
+                description: Node.js version used for build, unit and e2e jobs.
+                type: string
+                default: '26'
+            build:
+                description: Run `npm ci && npm run build` before the PHP tests.
+                type: boolean
+                default: true
+            js-unit:
+                description: Run `npm run test:unit`.
+                type: boolean
+                default: false
+            e2e:
+                description: Run wp-env + Playwright (`npm run test:e2e`).
+                type: boolean
+                default: false
+            php-lint:
+                description: Run `composer lint` (phpcs).
+                type: boolean
+                default: false
+            js-lint:
+                description: Run `npm run lint:js` and `npm run lint:css` (each only if the script exists).
+                type: boolean
+                default: false
+            check-dist:
+                description: After `npm run build`, fail if the committed build output differs from a fresh build.
+                type: boolean
+                default: false
+            working-directory:
+                description: Plugin directory relative to the repo root (e.g. wp-content/plugins/my-plugin in a site repo).
+                type: string
+                default: '.'
+
+permissions:
+    contents: read
+
+jobs:
+    php-lint:
+        name: PHP lint
+        if: ${{ inputs.php-lint }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up PHP
+              uses: shivammathur/setup-php@v2
+              with:
+                  php-version: ${{ fromJSON(inputs.php-versions)[0] }}
+                  tools: composer
+                  coverage: none
+
+            - name: Install Composer dependencies
+              uses: ramsey/composer-install@v4
+              with:
+                  working-directory: ${{ inputs.working-directory }}
+
+            - name: Run phpcs
+              run: composer lint
+
+    js-lint:
+        name: JS & CSS lint
+        if: ${{ inputs.js-lint }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up Node
+              uses: actions/setup-node@v7
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+                  cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Lint JavaScript
+              run: npm run lint:js --if-present
+
+            - name: Lint CSS
+              if: ${{ !cancelled() }}
+              run: npm run lint:css --if-present
+
+    check-dist:
+        name: Committed build is up to date
+        if: ${{ inputs.check-dist }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up Node
+              uses: actions/setup-node@v7
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+                  cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Build
+              run: npm run build
+
+            - name: Check for uncommitted build output
+              run: |
+                  changes="$(git status --porcelain --untracked-files=all -- .)"
+                  if [ -n "$changes" ]; then
+                      echo "$changes"
+                      git --no-pager diff --stat -- .
+                      echo "::error::The committed build output is out of date. Run npm run build and commit the result."
+                      exit 1
+                  fi
+
+    js-unit:
+        name: JavaScript unit tests
+        if: ${{ inputs.js-unit }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up Node
+              uses: actions/setup-node@v7
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+                  cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Run unit tests
+              run: npm run test:unit
+
+    php:
+        name: PHP ${{ matrix.php }} / WP ${{ matrix.wp }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        strategy:
+            fail-fast: false
+            matrix:
+                php: ${{ fromJSON(inputs.php-versions) }}
+                wp: ${{ fromJSON(inputs.wp-versions) }}
+        services:
+            mysql:
+                image: mysql:8.0
+                env:
+                    MYSQL_ROOT_PASSWORD: root
+                    MYSQL_DATABASE: wordpress_tests
+                ports:
+                    - 3306:3306
+                options: >-
+                    --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+                    --health-interval=10s
+                    --health-timeout=5s
+                    --health-retries=10
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up PHP
+              uses: shivammathur/setup-php@v2
+              with:
+                  php-version: ${{ matrix.php }}
+                  extensions: ${{ inputs.php-extensions }}
+                  tools: composer
+                  coverage: none
+
+            - name: Install Composer dependencies
+              uses: ramsey/composer-install@v4
+              with:
+                  working-directory: ${{ inputs.working-directory }}
+
+            - name: Set up Node
+              if: ${{ inputs.build && hashFiles(format('{0}/package.json', inputs.working-directory)) != '' }}
+              uses: actions/setup-node@v7
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+                  cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+            - name: Build assets
+              if: ${{ inputs.build && hashFiles(format('{0}/package.json', inputs.working-directory)) != '' }}
+              run: |
+                  npm ci
+                  npm run build
+
+            - name: Install WordPress ${{ matrix.wp }} and its test library
+              env:
+                  WP_VERSION: ${{ matrix.wp }}
+              run: bash bin/install-wp-tests.sh "$WP_VERSION" wordpress_tests root root 127.0.0.1 >> "$GITHUB_ENV"
+
+            - name: Run PHP tests
+              run: composer test
+
+    e2e:
+        name: End-to-end tests
+        if: ${{ inputs.e2e }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up PHP
+              uses: shivammathur/setup-php@v2
+              with:
+                  php-version: ${{ fromJSON(inputs.php-versions)[0] }}
+                  tools: composer
+                  coverage: none
+
+            # Plugins require vendor/autoload.php for their own classes, so the
+            # production autoloader must exist before wp-env loads the plugin.
+            - name: Install Composer dependencies
+              uses: ramsey/composer-install@v4
+              with:
+                  working-directory: ${{ inputs.working-directory }}
+                  composer-options: '--no-dev'
+
+            - name: Set up Node
+              uses: actions/setup-node@v7
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+                  cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Build assets
+              if: ${{ inputs.build }}
+              run: npm run build
+
+            - name: Resolve Playwright version
+              id: playwright
+              run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+            - name: Cache Playwright browsers
+              uses: actions/cache@v6
+              with:
+                  path: ~/.cache/ms-playwright
+                  key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+            - name: Install Playwright browsers
+              run: npx playwright install --with-deps chromium
+
+            - name: Start wp-env
+              run: npm run env:start
+
+            - name: Run e2e tests
+              run: npm run test:e2e
+
+            - name: Upload Playwright report
+              if: ${{ !cancelled() }}
+              uses: actions/upload-artifact@v7
+              with:
+                  name: playwright-report
+                  path: ${{ inputs.working-directory }}/artifacts/
+                  retention-days: 7
+                  if-no-files-found: ignore
+
+            - name: Stop wp-env
+              if: ${{ always() }}
+              run: npm run env:stop

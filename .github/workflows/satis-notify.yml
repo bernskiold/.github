@@ -1,0 +1,68 @@
+# Reusable: asks bernskiold/packages.bernskiold.com to rebuild its Satis index
+# for the calling repository, so a new version appears on
+# packages.bernskiold.com immediately instead of after the nightly run.
+#
+# Generic: works for WordPress plugins, Laravel packages and any other
+# Composer package listed in satis.json.
+#
+# Call with `secrets: inherit` (needs the SATIS_DISPATCH_TOKEN org secret, a
+# token with repository_dispatch rights on the packages repo).
+#
+# When the caller is triggered by `workflow_run`, the dispatch only happens if
+# the triggering run succeeded.
+name: Satis Notify
+
+on:
+    workflow_call:
+        inputs:
+            repository-url:
+                description: Repository URL as listed in satis.json. Empty means https://github.com/<owner>/<repo>.
+                type: string
+                default: ''
+            satis-repository:
+                description: Repository that builds the Satis index.
+                type: string
+                default: 'bernskiold/packages.bernskiold.com'
+        secrets:
+            SATIS_DISPATCH_TOKEN:
+                required: false
+
+permissions: {}
+
+jobs:
+    dispatch:
+        name: Request Satis Rebuild
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+        # A release usually fires several triggers at once (tag push, release,
+        # workflow_run). Collapse them into a single rebuild per repository.
+        concurrency:
+            group: satis-dispatch-${{ github.repository }}
+            cancel-in-progress: true
+        steps:
+            - name: Check token
+              env:
+                  TOKEN: ${{ secrets.SATIS_DISPATCH_TOKEN }}
+              run: |
+                  if [ -z "$TOKEN" ]; then
+                      echo "::error::SATIS_DISPATCH_TOKEN is not available. Call this workflow with 'secrets: inherit'."
+                      exit 1
+                  fi
+
+            - name: Build payload
+              id: payload
+              env:
+                  REPOSITORY_URL: ${{ inputs.repository-url || format('https://github.com/{0}', github.repository) }}
+              run: |
+                  echo "json=$(jq -cn --arg url "$REPOSITORY_URL" '{repository_url: $url}')" >> "$GITHUB_OUTPUT"
+
+            # Naming the repo lets Satis rescan only this one instead of all of
+            # them. The URL must match satis.json exactly.
+            - name: Dispatch build
+              uses: peter-evans/repository-dispatch@v4
+              with:
+                  token: ${{ secrets.SATIS_DISPATCH_TOKEN }}
+                  repository: ${{ inputs.satis-repository }}
+                  event-type: build
+                  client-payload: ${{ steps.payload.outputs.json }}
