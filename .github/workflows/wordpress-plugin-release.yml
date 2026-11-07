@@ -1,23 +1,39 @@
 # Reusable release workflow for Bernskiold WordPress plugins.
 #
-# Call it from a workflow triggered by `release: types: [published]` and name
-# that caller workflow "Build Release" (see the Satis note in README.md).
+# Call it from a `workflow_dispatch` workflow (see README.md). It releases the
+# tip of the default branch as `version`:
 #
-# Steps: read the version from the release tag (leading "v" stripped), prepend
-# the release notes to CHANGELOG.md (unless `changelog: false`), bump
-# package.json, the main plugin file's `Version:` header and every
-# `version = '...'` in `version-files`, optionally build, commit the result to
-# the default branch, move the tag onto that commit and attach a
-# `<repo-name>.zip` built with `git archive` (honours .gitattributes
-# export-ignore) to the release. With `composer: true` the ZIP also contains
-# the production vendor/; a `.distignore`, if present, is applied as well.
+#   1. check that `version` is valid semver, not tagged yet and greater than
+#      the latest release
+#   2. take the notes from a draft release for that tag, else the `notes`
+#      input, else GitHub's generated notes
+#   3. bump package.json, the plugin header and `version-files`, update
+#      CHANGELOG.md, build, and make a single "Release x.y.z" commit
+#   4. create an annotated tag on that commit and push branch + tag atomically
+#      (never forced, so Packagist and Satis see the tag exactly once, on the
+#      final commit)
+#   5. build `<repo-name>.zip` and publish the release (the draft, if any)
+#   6. optionally ask Satis to rebuild (`satis: true`)
 #
-# The caller must grant `permissions: contents: write`.
+# The caller must grant `permissions: contents: write` and pass
+# `secrets: inherit` when `satis` is on.
 name: WordPress Plugin Release
 
 on:
     workflow_call:
         inputs:
+            version:
+                description: Version to release, semver without a leading "v" (e.g. 1.2.3 or 2.0.0-beta.1).
+                type: string
+                required: true
+            notes:
+                description: Release notes. Ignored when a draft release for the tag exists; empty means generated notes.
+                type: string
+                default: ''
+            prerelease:
+                description: Mark the GitHub release as a pre-release (CHANGELOG.md is not updated).
+                type: boolean
+                default: false
             build:
                 description: Run `npm ci --ignore-scripts && npm run build` before committing.
                 type: boolean
@@ -42,43 +58,126 @@ on:
                 description: Run `composer install --no-dev --optimize-autoloader` and ship `vendor/` in the ZIP.
                 type: boolean
                 default: false
+            satis:
+                description: Ask packages.bernskiold.com to rebuild its Satis index after the release. Needs the caller to pass secrets with inherit.
+                type: boolean
+                default: false
+        secrets:
+            SATIS_DISPATCH_TOKEN:
+                required: false
 
 permissions:
     contents: write
 
 jobs:
     release:
-        name: Build & Attach Plugin
+        name: Release ${{ inputs.version }}
         runs-on: ubuntu-latest
-        timeout-minutes: 15
+        timeout-minutes: 20
+        # One release per repository at a time; never cancel one half-way.
+        concurrency:
+            group: wordpress-plugin-release-${{ github.repository }}
+            cancel-in-progress: false
+        env:
+            VERSION: ${{ inputs.version }}
+            DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+            SLUG: ${{ github.event.repository.name }}
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
         steps:
-            - name: Determine version
-              id: version
-              env:
-                  TAG: ${{ github.event.release.tag_name }}
-              run: |
-                  if [ -z "$TAG" ]; then
-                      echo "::error::No release tag found. Call this workflow from an 'on: release' trigger."
-                      exit 1
-                  fi
-                  echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-                  echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-            - name: Checkout code
+            - name: Checkout default branch
               uses: actions/checkout@v7
               with:
                   ref: ${{ github.event.repository.default_branch }}
                   fetch-depth: 0
+                  fetch-tags: true
+
+            - name: Validate version
+              id: check
+              run: |
+                  semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+                  if ! [[ "$VERSION" =~ $semver ]]; then
+                      echo "::error::'$VERSION' is not a valid semver version (expected e.g. 1.2.3, without a leading v)."
+                      exit 1
+                  fi
+
+                  for tag in "$VERSION" "v$VERSION"; do
+                      if git rev-parse -q --verify "refs/tags/$tag" >/dev/null \
+                          || [ -n "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+                          echo "::error::Tag $tag already exists. Tags are never moved; pick a new version."
+                          exit 1
+                      fi
+                  done
+
+                  # 404 when the repo has no published release yet.
+                  if ! latest="$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>/dev/null)"; then
+                      latest=""
+                  fi
+                  if [ -n "$latest" ]; then
+                      python3 - "$VERSION" "${latest#v}" <<'PY'
+                  import re, sys
+
+                  def key(v):
+                      m = re.match(r'^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$', v)
+                      if not m:
+                          print(f"::error::Latest release '{v}' is not semver; cannot compare.")
+                          sys.exit(1)
+                      core = tuple(int(x) for x in m.group(1, 2, 3))
+                      pre = m.group(4)
+                      if pre is None:
+                          return core, (1,)
+                      ids = tuple((0, int(p), '') if p.isdigit() else (1, 0, p) for p in pre.split('.'))
+                      return core, (0,) + ids
+
+                  new, latest = sys.argv[1], sys.argv[2]
+                  if key(new) <= key(latest):
+                      print(f"::error::{new} is not greater than the latest release {latest}.")
+                      sys.exit(1)
+                  PY
+                  fi
+                  echo "previous=$latest" >> "$GITHUB_OUTPUT"
+
+            - name: Resolve release notes
+              id: notes
+              env:
+                  NOTES_INPUT: ${{ inputs.notes }}
+                  PREVIOUS: ${{ steps.check.outputs.previous }}
+              run: |
+                  notes_file="$RUNNER_TEMP/release-notes.md"
+
+                  # Draft releases don't create tags, so they are a safe place
+                  # to write notes ahead of time.
+                  draft="$(gh api "repos/$GH_REPO/releases" --paginate \
+                      --jq ".[] | select(.draft and (.tag_name == \"$VERSION\" or .tag_name == \"v$VERSION\")) | .id" | head -n 1)"
+
+                  if [ -n "$draft" ]; then
+                      echo "Using the notes of draft release $draft."
+                      gh api "repos/$GH_REPO/releases/$draft" --jq '.body // ""' > "$notes_file"
+                  elif [ -n "$NOTES_INPUT" ]; then
+                      echo "Using the notes input."
+                      printf '%s\n' "$NOTES_INPUT" > "$notes_file"
+                  else
+                      echo "Generating release notes."
+                      args=(-f tag_name="$VERSION" -f target_commitish="$DEFAULT_BRANCH")
+                      [ -n "$PREVIOUS" ] && args+=(-f previous_tag_name="$PREVIOUS")
+                      gh api -X POST "repos/$GH_REPO/releases/generate-notes" "${args[@]}" --jq .body > "$notes_file"
+                  fi
+
+                  {
+                      echo "draft-id=$draft"
+                      echo "file=$notes_file"
+                      delimiter="NOTES_$(openssl rand -hex 16)"
+                      echo "body<<$delimiter"
+                      cat "$notes_file"
+                      echo "$delimiter"
+                  } >> "$GITHUB_OUTPUT"
 
             - name: Bump package.json
               if: ${{ hashFiles('package.json') != '' }}
-              env:
-                  VERSION: ${{ steps.version.outputs.version }}
               run: npm pkg set version="$VERSION"
 
             - name: Bump main plugin file
               env:
-                  VERSION: ${{ steps.version.outputs.version }}
                   MAIN_FILE: ${{ inputs.main-file || format('{0}.php', github.event.repository.name) }}
               run: |
                   if [ ! -f "$MAIN_FILE" ]; then
@@ -91,7 +190,6 @@ jobs:
 
             - name: Bump version in version files
               env:
-                  VERSION: ${{ steps.version.outputs.version }}
                   VERSION_FILES: ${{ inputs.version-files }}
               run: |
                   while IFS= read -r file; do
@@ -121,33 +219,28 @@ jobs:
               if: ${{ inputs.build }}
               run: npm run build
 
-            # Part of the same commit and push as the version bump, so no
-            # separate "Update Changelog" workflow races this one to the
-            # default branch.
             - name: Update changelog
-              if: ${{ inputs.changelog && !github.event.release.prerelease && hashFiles('CHANGELOG.md') != '' }}
+              if: ${{ inputs.changelog && !inputs.prerelease && hashFiles('CHANGELOG.md') != '' }}
               uses: stefanzweifel/changelog-updater-action@v1
               with:
-                  latest-version: ${{ github.event.release.name || steps.version.outputs.tag }}
-                  release-notes: ${{ github.event.release.body }}
+                  latest-version: ${{ inputs.version }}
+                  release-notes: ${{ steps.notes.outputs.body }}
 
-            - name: Commit version bump & build
-              uses: stefanzweifel/git-auto-commit-action@v7
-              with:
-                  branch: ${{ github.event.repository.default_branch }}
-                  commit_message: "Prepare release ${{ steps.version.outputs.version }}"
-
-            # Uses GITHUB_TOKEN, so this push does NOT trigger `push: tags`
-            # workflows. Satis is notified via `workflow_run` instead.
-            - name: Move tag to release commit
-              env:
-                  TAG: ${{ steps.version.outputs.tag }}
+            # One commit, one annotated tag on it, one atomic push. The tag is
+            # created exactly once and never moved: Packagist (and Satis)
+            # index a tag the first time they see it and refuse a retag.
+            - name: Commit, tag and push
+              id: commit
               run: |
-                  git tag -f "$TAG" HEAD
-                  git push -f origin "refs/tags/$TAG"
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git add -A
+                  git commit --allow-empty -q -m "Release $VERSION"
+                  git tag -a "$VERSION" -m "Release $VERSION"
+                  git push --atomic origin "HEAD:refs/heads/$DEFAULT_BRANCH" "refs/tags/$VERSION"
+                  echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-            # Runs after the commit so vendor/ can never be committed by the
-            # auto-commit step, only shipped in the ZIP.
+            # Runs after the commit so vendor/ is only ever shipped in the ZIP.
             - name: Set up PHP
               if: ${{ inputs.composer }}
               uses: shivammathur/setup-php@v2
@@ -166,7 +259,6 @@ jobs:
             # as used by `wp dist-archive`) is applied before zipping.
             - name: Create plugin ZIP
               env:
-                  SLUG: ${{ github.event.repository.name }}
                   WITH_VENDOR: ${{ inputs.composer }}
               run: |
                   if [ "$WITH_VENDOR" != "true" ] && [ ! -f .distignore ]; then
@@ -191,8 +283,37 @@ jobs:
                   (cd "$STAGE/dist" && zip -qrX "$GITHUB_WORKSPACE/$SLUG.zip" "$SLUG")
                   unzip -l "$SLUG.zip" | tail -1
 
-            - name: Attach ZIP to release
-              uses: softprops/action-gh-release@v3
-              with:
-                  tag_name: ${{ steps.version.outputs.tag }}
-                  files: ${{ github.event.repository.name }}.zip
+            - name: Publish GitHub release
+              env:
+                  DRAFT_ID: ${{ steps.notes.outputs.draft-id }}
+                  NOTES_FILE: ${{ steps.notes.outputs.file }}
+                  PRERELEASE: ${{ inputs.prerelease }}
+              run: |
+                  if [ -n "$DRAFT_ID" ]; then
+                      # Point the draft at the new tag and publish it (title and
+                      # notes are kept as written).
+                      gh api -X PATCH "repos/$GH_REPO/releases/$DRAFT_ID" \
+                          -f tag_name="$VERSION" \
+                          -F draft=false \
+                          -F prerelease="$PRERELEASE" >/dev/null
+                      gh release upload "$VERSION" "$SLUG.zip" --clobber
+                  else
+                      flags=()
+                      [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+                      gh release create "$VERSION" "$SLUG.zip" \
+                          --verify-tag \
+                          --title "$VERSION" \
+                          --notes-file "$NOTES_FILE" \
+                          "${flags[@]}"
+                  fi
+                  echo "### Released [$VERSION](${GITHUB_SERVER_URL}/${GH_REPO}/releases/tag/${VERSION})" >> "$GITHUB_STEP_SUMMARY"
+
+    # The tag push and release above use GITHUB_TOKEN, which never triggers
+    # the repo's own workflows (e.g. a notify-satis caller), so dispatch here.
+    satis:
+        name: Notify Satis
+        needs: release
+        if: ${{ inputs.satis }}
+        permissions: {}
+        uses: bernskiold/.github/.github/workflows/satis-notify.yml@main
+        secrets: inherit
