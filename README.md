@@ -20,6 +20,7 @@ thin workflow in your repo with
 | --- | --- | --- | --- |
 | `php-versions` | string (JSON array) | `'["8.2","8.3","8.4","8.5"]'` | PHP versions in the PHPUnit matrix |
 | `wp-versions` | string (JSON array) | `'["7.0","latest"]'` | WordPress versions in the PHPUnit matrix |
+| `php-extensions` | string | `'mysqli'` | PHP extensions for the PHPUnit job, in shivammathur/setup-php `extensions` syntax, e.g. `'mysqli, imagick'`. Keep `mysqli`, since the WP test suite needs it |
 | `node-version` | string | `'26'` | Node.js version |
 | `build` | boolean | `true` | Run `npm ci && npm run build` before the PHP tests (skipped if there is no `package.json`) |
 | `js-unit` | boolean | `false` | Run `npm run test:unit` |

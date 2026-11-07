@@ -28,6 +28,10 @@ on:
                 description: JSON array of WordPress versions ("latest" allowed) for the PHPUnit matrix.
                 type: string
                 default: '["7.0","latest"]'
+            php-extensions:
+                description: PHP extensions for the PHPUnit job (shivammathur/setup-php `extensions` syntax, e.g. 'mysqli, imagick').
+                type: string
+                default: 'mysqli'
             node-version:
                 description: Node.js version used for build, unit and e2e jobs.
                 type: string
@@ -209,7 +213,7 @@ jobs:
               uses: shivammathur/setup-php@v2
               with:
                   php-version: ${{ matrix.php }}
-                  extensions: mysqli
+                  extensions: ${{ inputs.php-extensions }}
                   tools: composer
                   coverage: none
 
