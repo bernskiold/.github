@@ -25,11 +25,22 @@ thin workflow in your repo with
 | `js-unit` | boolean | `false` | Run `npm run test:unit` |
 | `e2e` | boolean | `false` | Start wp-env (`npm run env:start`) and run Playwright (`npm run test:e2e`); the report in `artifacts/` is uploaded |
 | `lint` | boolean | `false` | Run `composer lint` (phpcs), and `npm run lint` if that script exists |
+| `working-directory` | string | `'.'` | Plugin directory relative to the repo root. Every npm, composer and PHPUnit step runs there, and the npm cache, composer install and Playwright report paths follow it. Use it for a plugin inside a site repo, e.g. `wp-content/plugins/ehs-courses` |
 
 The plugin must provide `bin/install-wp-tests.sh [wp-version] [db-name] [db-user] [db-pass] [db-host]`
 (as in bm-concierge / bm-block-library) that prints `KEY=value` lines such as
 `WP_PHPUNIT__DIR=...`, and `composer test` running PHPUnit. A MySQL 8 service is
 provided. The lint and e2e jobs use the first entry of `php-versions`.
+
+For a plugin that lives inside a site repo, point the workflow at it:
+
+```yaml
+jobs:
+    tests:
+        uses: bernskiold/.github/.github/workflows/wordpress-plugin-tests.yml@main
+        with:
+            working-directory: wp-content/plugins/ehs-courses
+```
 
 ```yaml
 # .github/workflows/tests.yml
