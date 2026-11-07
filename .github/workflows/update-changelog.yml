@@ -1,6 +1,10 @@
 # Prepends the release notes to CHANGELOG.md on the default branch when a
 # release is published.
 #
+# WordPress plugins using wordpress-plugin-release.yml do NOT need this: the
+# release workflow updates CHANGELOG.md in its own commit. Running both would
+# race two pushes to the default branch.
+#
 # Also reusable: other repos can call it from an `on: release: types: [released]`
 # workflow:
 #   jobs:

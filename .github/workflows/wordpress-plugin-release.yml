@@ -3,7 +3,8 @@
 # Call it from a workflow triggered by `release: types: [published]` and name
 # that caller workflow "Build Release" (see the Satis note in README.md).
 #
-# Steps: read the version from the release tag (leading "v" stripped), bump
+# Steps: read the version from the release tag (leading "v" stripped), prepend
+# the release notes to CHANGELOG.md (unless `changelog: false`), bump
 # package.json, the main plugin file's `Version:` header and every
 # `version = '...'` in `version-files`, optionally build, commit the result to
 # the default branch, move the tag onto that commit and attach a
@@ -33,6 +34,10 @@ on:
                 description: Newline-separated files in which `version = '...'` is bumped.
                 type: string
                 default: 'src/Plugin.php'
+            changelog:
+                description: Prepend the release notes to CHANGELOG.md (if it exists) in the release commit. Skipped for pre-releases.
+                type: boolean
+                default: true
             composer:
                 description: Run `composer install --no-dev --optimize-autoloader` and ship `vendor/` in the ZIP.
                 type: boolean
@@ -115,6 +120,16 @@ jobs:
             - name: Build
               if: ${{ inputs.build }}
               run: npm run build
+
+            # Part of the same commit and push as the version bump, so no
+            # separate "Update Changelog" workflow races this one to the
+            # default branch.
+            - name: Update changelog
+              if: ${{ inputs.changelog && !github.event.release.prerelease && hashFiles('CHANGELOG.md') != '' }}
+              uses: stefanzweifel/changelog-updater-action@v1
+              with:
+                  latest-version: ${{ github.event.release.name || steps.version.outputs.tag }}
+                  release-notes: ${{ github.event.release.body }}
 
             - name: Commit version bump & build
               uses: stefanzweifel/git-auto-commit-action@v7

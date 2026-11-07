@@ -12,7 +12,7 @@ thin workflow in your repo with
 | [`wordpress-plugin-release.yml`](.github/workflows/wordpress-plugin-release.yml) | Bump versions, build, commit, move the tag and attach the plugin ZIP to the release |
 | [`satis-notify.yml`](.github/workflows/satis-notify.yml) | Ask packages.bernskiold.com to rebuild its Satis index for this repo (any Composer package) |
 | [`dependabot-auto-merge.yml`](.github/workflows/dependabot-auto-merge.yml) | Enable auto-merge (squash) on Dependabot patch and minor PRs |
-| [`update-changelog.yml`](.github/workflows/update-changelog.yml) | Prepend the release notes to `CHANGELOG.md` |
+| [`update-changelog.yml`](.github/workflows/update-changelog.yml) | Prepend the release notes to `CHANGELOG.md` (non-WordPress repos; the plugin release workflow already does it) |
 
 ## `wordpress-plugin-tests.yml`
 
@@ -78,9 +78,11 @@ jobs:
 | `node-version` | string | `'26'` | Node.js version for the build |
 | `main-file` | string | `''` | Main plugin file with the `Version:` header; empty means `<repo-name>.php` |
 | `version-files` | string | `'src/Plugin.php'` | Newline-separated files in which `version = '...'` is bumped (missing files are skipped with a warning; pass `''` for none) |
+| `changelog` | boolean | `true` | Prepend the release notes to `CHANGELOG.md` (if the file exists) in the release commit; skipped for pre-releases |
 | `composer` | boolean | `false` | Run `composer install --no-dev --optimize-autoloader` after the release commit and ship `vendor/` in the ZIP |
 
-On a published release it strips a leading `v` from the tag, bumps
+On a published release it strips a leading `v` from the tag, prepends the
+release notes to `CHANGELOG.md`, bumps
 `package.json`, the `Version:` header and the `version-files`, builds, commits
 "Prepare release x.y.z" to the default branch, force-moves the tag onto that
 commit and attaches `<repo-name>.zip` (made with `git archive`, so
@@ -175,6 +177,12 @@ jobs:
 ## `update-changelog.yml`
 
 No inputs. Prepends the release notes to `CHANGELOG.md` on the repo's default branch (`main` or `master`).
+
+**WordPress plugins using `wordpress-plugin-release.yml` don't need this.** The
+release workflow updates the changelog in its own "Prepare release" commit, so
+there is a single push to the default branch. Running both would make two
+workflows race to push. Use this for repos without that release workflow, such
+as Laravel packages.
 
 ```yaml
 # .github/workflows/update-changelog.yml
