@@ -1,7 +1,15 @@
 # Managed by configure-repos.sh
+#
+# Also reusable: other repos can call it from a `pull_request_target` workflow:
+#   jobs:
+#     auto-merge:
+#       uses: bernskiold/.github/.github/workflows/dependabot-auto-merge.yml@main
+#       permissions: { contents: write, pull-requests: write }
 name: Dependabot Auto-Merge
 
-on: pull_request_target
+on:
+  pull_request_target:
+  workflow_call:
 
 permissions:
   contents: write
@@ -14,7 +22,7 @@ jobs:
     steps:
       - name: Fetch Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 

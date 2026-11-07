@@ -1,0 +1,138 @@
+# Reusable release workflow for Bernskiold WordPress plugins.
+#
+# Call it from a workflow triggered by `release: types: [published]` and name
+# that caller workflow "Build Release" (see the Satis note in README.md).
+#
+# Steps: read the version from the release tag (leading "v" stripped), bump
+# package.json, the main plugin file's `Version:` header and every
+# `version = '...'` in `version-files`, optionally build, commit the result to
+# the default branch, move the tag onto that commit and attach a
+# `<repo-name>.zip` built with `git archive` (honours .gitattributes
+# export-ignore) to the release.
+#
+# The caller must grant `permissions: contents: write`.
+name: WordPress Plugin Release
+
+on:
+    workflow_call:
+        inputs:
+            build:
+                description: Run `npm ci --ignore-scripts && npm run build` before committing.
+                type: boolean
+                default: true
+            node-version:
+                description: Node.js version used for the build.
+                type: string
+                default: '26'
+            main-file:
+                description: Main plugin file with the `Version:` header. Empty means `<repo-name>.php`.
+                type: string
+                default: ''
+            version-files:
+                description: Newline-separated files in which `version = '...'` is bumped.
+                type: string
+                default: 'src/Plugin.php'
+
+permissions:
+    contents: write
+
+jobs:
+    release:
+        name: Build & Attach Plugin
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - name: Determine version
+              id: version
+              env:
+                  TAG: ${{ github.event.release.tag_name }}
+              run: |
+                  if [ -z "$TAG" ]; then
+                      echo "::error::No release tag found. Call this workflow from an 'on: release' trigger."
+                      exit 1
+                  fi
+                  echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+                  echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+            - name: Checkout code
+              uses: actions/checkout@v7
+              with:
+                  ref: ${{ github.event.repository.default_branch }}
+                  fetch-depth: 0
+
+            - name: Bump package.json
+              if: ${{ hashFiles('package.json') != '' }}
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+              run: npm pkg set version="$VERSION"
+
+            - name: Bump main plugin file
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+                  MAIN_FILE: ${{ inputs.main-file || format('{0}.php', github.event.repository.name) }}
+              run: |
+                  if [ ! -f "$MAIN_FILE" ]; then
+                      echo "::error::Main plugin file '$MAIN_FILE' not found. Set the main-file input."
+                      exit 1
+                  fi
+                  perl -pi -e 's/^([\s*]*Version:\s+).*$/${1}$ENV{VERSION}/' "$MAIN_FILE"
+                  grep -Eq "^[[:space:]*]*Version:[[:space:]]+${VERSION//./\\.}\$" "$MAIN_FILE" \
+                      || { echo "::error::No 'Version:' header was updated in $MAIN_FILE."; exit 1; }
+
+            - name: Bump version in version files
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+                  VERSION_FILES: ${{ inputs.version-files }}
+              run: |
+                  while IFS= read -r file; do
+                      file="$(echo "$file" | xargs)"
+                      [ -z "$file" ] && continue
+                      if [ ! -f "$file" ]; then
+                          echo "::warning::Version file '$file' not found; skipping."
+                          continue
+                      fi
+                      perl -pi -e "s/\bversion(\s*)=(\s*)'[^']*';/version\${1}=\${2}'\$ENV{VERSION}';/" "$file"
+                      grep -q "'${VERSION}';" "$file" \
+                          || echo "::warning::No \"version = '...'\" assignment found in $file."
+                  done <<< "$VERSION_FILES"
+
+            - name: Set up Node
+              if: ${{ inputs.build }}
+              uses: actions/setup-node@v7
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+
+            - name: Install NPM packages
+              if: ${{ inputs.build }}
+              run: npm ci --ignore-scripts
+
+            - name: Build
+              if: ${{ inputs.build }}
+              run: npm run build
+
+            - name: Commit version bump & build
+              uses: stefanzweifel/git-auto-commit-action@v7
+              with:
+                  branch: ${{ github.event.repository.default_branch }}
+                  commit_message: "Prepare release ${{ steps.version.outputs.version }}"
+
+            # Uses GITHUB_TOKEN, so this push does NOT trigger `push: tags`
+            # workflows. Satis is notified via `workflow_run` instead.
+            - name: Move tag to release commit
+              env:
+                  TAG: ${{ steps.version.outputs.tag }}
+              run: |
+                  git tag -f "$TAG" HEAD
+                  git push -f origin "refs/tags/$TAG"
+
+            - name: Create plugin ZIP
+              env:
+                  SLUG: ${{ github.event.repository.name }}
+              run: git archive --format=zip --prefix="$SLUG/" -o "$SLUG.zip" HEAD
+
+            - name: Attach ZIP to release
+              uses: softprops/action-gh-release@v3
+              with:
+                  tag_name: ${{ steps.version.outputs.tag }}
+                  files: ${{ github.event.repository.name }}.zip
