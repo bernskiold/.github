@@ -8,7 +8,8 @@
 # `version = '...'` in `version-files`, optionally build, commit the result to
 # the default branch, move the tag onto that commit and attach a
 # `<repo-name>.zip` built with `git archive` (honours .gitattributes
-# export-ignore) to the release.
+# export-ignore) to the release. With `composer: true` the ZIP also contains
+# the production vendor/; a `.distignore`, if present, is applied as well.
 #
 # The caller must grant `permissions: contents: write`.
 name: WordPress Plugin Release
@@ -32,6 +33,10 @@ on:
                 description: Newline-separated files in which `version = '...'` is bumped.
                 type: string
                 default: 'src/Plugin.php'
+            composer:
+                description: Run `composer install --no-dev --optimize-autoloader` and ship `vendor/` in the ZIP.
+                type: boolean
+                default: false
 
 permissions:
     contents: write
@@ -126,10 +131,50 @@ jobs:
                   git tag -f "$TAG" HEAD
                   git push -f origin "refs/tags/$TAG"
 
+            # Runs after the commit so vendor/ can never be committed by the
+            # auto-commit step, only shipped in the ZIP.
+            - name: Set up PHP
+              if: ${{ inputs.composer }}
+              uses: shivammathur/setup-php@v2
+              with:
+                  php-version: '8.2'
+                  tools: composer
+                  coverage: none
+
+            - name: Install production Composer dependencies
+              if: ${{ inputs.composer }}
+              run: composer install --no-dev --optimize-autoloader --no-interaction --no-progress
+
+            # Without Composer deps or a .distignore, the ZIP is a plain
+            # `git archive` of the release commit. Otherwise the same archive
+            # is extracted, vendor/ is added and .distignore (rsync patterns,
+            # as used by `wp dist-archive`) is applied before zipping.
             - name: Create plugin ZIP
               env:
                   SLUG: ${{ github.event.repository.name }}
-              run: git archive --format=zip --prefix="$SLUG/" -o "$SLUG.zip" HEAD
+                  WITH_VENDOR: ${{ inputs.composer }}
+              run: |
+                  if [ "$WITH_VENDOR" != "true" ] && [ ! -f .distignore ]; then
+                      git archive --format=zip --prefix="$SLUG/" -o "$SLUG.zip" HEAD
+                      exit 0
+                  fi
+
+                  STAGE="$RUNNER_TEMP/plugin-zip"
+                  rm -rf "$STAGE" && mkdir -p "$STAGE/archive/$SLUG" "$STAGE/dist"
+                  git archive --format=tar HEAD | tar -x -C "$STAGE/archive/$SLUG"
+
+                  if [ "$WITH_VENDOR" = "true" ]; then
+                      rsync -a vendor/ "$STAGE/archive/$SLUG/vendor/"
+                  fi
+
+                  EXCLUDES=()
+                  if [ -f .distignore ]; then
+                      EXCLUDES=(--exclude-from="$PWD/.distignore")
+                  fi
+                  rsync -a "${EXCLUDES[@]}" "$STAGE/archive/$SLUG/" "$STAGE/dist/$SLUG/"
+
+                  (cd "$STAGE/dist" && zip -qrX "$GITHUB_WORKSPACE/$SLUG.zip" "$SLUG")
+                  unzip -l "$SLUG.zip" | tail -1
 
             - name: Attach ZIP to release
               uses: softprops/action-gh-release@v3

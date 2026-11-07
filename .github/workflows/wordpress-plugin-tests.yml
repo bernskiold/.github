@@ -2,7 +2,7 @@
 #
 # Runs the PHP integration suite against a real WordPress (WP test library via
 # the plugin's bin/install-wp-tests.sh + a MySQL service) across a PHP x WP
-# matrix, plus optional lint, Jest unit and wp-env/Playwright e2e jobs.
+# matrix, plus optional PHP/JS lint, committed-build check, Jest unit and wp-env/Playwright e2e jobs.
 #
 # Plugin requirements:
 #   - bin/install-wp-tests.sh [wp-version] [db-name] [db-user] [db-pass] [db-host]
@@ -10,7 +10,7 @@
 #   - `composer test` runs PHPUnit.
 #   - `npm run build` (when `build` is true and a package.json exists).
 #   - `npm run test:unit` (js-unit), `npm run env:start` + `npm run test:e2e` (e2e),
-#     `composer lint` (lint).
+#     `composer lint` (php-lint), `npm run lint:js` / `lint:css` (js-lint).
 # All of these run inside `working-directory` (default: repo root), so a
 # plugin nested in a site repo can be tested too.
 #
@@ -44,8 +44,16 @@ on:
                 description: Run wp-env + Playwright (`npm run test:e2e`).
                 type: boolean
                 default: false
-            lint:
-                description: Run `composer lint` (phpcs), and `npm run lint` if present.
+            php-lint:
+                description: Run `composer lint` (phpcs).
+                type: boolean
+                default: false
+            js-lint:
+                description: Run `npm run lint:js` and `npm run lint:css` (each only if the script exists).
+                type: boolean
+                default: false
+            check-dist:
+                description: After `npm run build`, fail if the committed build output differs from a fresh build.
                 type: boolean
                 default: false
             working-directory:
@@ -57,9 +65,9 @@ permissions:
     contents: read
 
 jobs:
-    lint:
-        name: Lint
-        if: ${{ inputs.lint }}
+    php-lint:
+        name: PHP lint
+        if: ${{ inputs.php-lint }}
         runs-on: ubuntu-latest
         timeout-minutes: 10
         defaults:
@@ -80,22 +88,70 @@ jobs:
               with:
                   working-directory: ${{ inputs.working-directory }}
 
-            - name: Run PHP lint
+            - name: Run phpcs
               run: composer lint
 
+    js-lint:
+        name: JS & CSS lint
+        if: ${{ inputs.js-lint }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        steps:
+            - uses: actions/checkout@v7
+
             - name: Set up Node
-              if: ${{ hashFiles(format('{0}/package.json', inputs.working-directory)) != '' }}
               uses: actions/setup-node@v7
               with:
                   node-version: ${{ inputs.node-version }}
                   cache: npm
                   cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
-            - name: Run JS lint (if present)
-              if: ${{ hashFiles(format('{0}/package.json', inputs.working-directory)) != '' }}
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Lint JavaScript
+              run: npm run lint:js --if-present
+
+            - name: Lint CSS
+              if: ${{ !cancelled() }}
+              run: npm run lint:css --if-present
+
+    check-dist:
+        name: Committed build is up to date
+        if: ${{ inputs.check-dist }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        defaults:
+            run:
+                working-directory: ${{ inputs.working-directory }}
+        steps:
+            - uses: actions/checkout@v7
+
+            - name: Set up Node
+              uses: actions/setup-node@v7
+              with:
+                  node-version: ${{ inputs.node-version }}
+                  cache: npm
+                  cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Build
+              run: npm run build
+
+            - name: Check for uncommitted build output
               run: |
-                  npm ci
-                  npm run lint --if-present
+                  changes="$(git status --porcelain --untracked-files=all -- .)"
+                  if [ -n "$changes" ]; then
+                      echo "$changes"
+                      git --no-pager diff --stat -- .
+                      echo "::error::The committed build output is out of date. Run npm run build and commit the result."
+                      exit 1
+                  fi
 
     js-unit:
         name: JavaScript unit tests
